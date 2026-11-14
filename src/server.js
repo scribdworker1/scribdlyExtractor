@@ -10,6 +10,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const WORKER_SECRET = process.env.WORKER_SECRET || '';
 
+// ─── Replica Identity ─────────────────────────────────
+// RAILWAY_REPLICA_ID is unique per replica; RAILWAY_DEPLOYMENT_ID is shared.
+const REPLICA_ID = process.env.RAILWAY_REPLICA_ID || 'local';
+const tag = `[replica ${REPLICA_ID}]`;
+
 // ─── Security ────────────────────────────────────────
 app.use(helmet());
 app.set('trust proxy', 1);
@@ -55,6 +60,7 @@ app.get('/health', (req, res) => {
   const os = require('os');
   res.json({
     status: 'ok',
+    replica: REPLICA_ID,
     worker: process.env.WORKER_ID || 'scribdly-worker',
     uptime: Math.round(process.uptime()),
     user: os.userInfo ? os.userInfo().username : 'unknown',
@@ -70,7 +76,7 @@ let extractionQueue = Promise.resolve();
 
 function enqueueExtraction(fn) {
   const result = extractionQueue.then(fn, fn);
-  extractionQueue = result.catch(() => {});
+  extractionQueue = result.catch(() => { });
   return result;
 }
 
@@ -118,7 +124,7 @@ app.post('/extract', requireSecret, async (req, res) => {
 
   const rangeStr = startPage || endPage ? ` [pages ${startPage || 1}..${endPage || 'end'}]` : '';
   console.log(
-    `[Worker] Queued extraction for document ${documentId}${rangeStr}${html ? ' (with pre-resolved HTML)' : ''}`
+      `${tag} [Worker] Queued extraction for document ${documentId}${rangeStr}${html ? ' (with pre-resolved HTML)' : ''}`
   );
   const startedAt = Date.now();
 
@@ -131,7 +137,7 @@ app.post('/extract', requireSecret, async (req, res) => {
 
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(
-      `[Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${elapsed}s — ${pdfBuffer.length} bytes`
+        `${tag} [Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${elapsed}s — ${pdfBuffer.length} bytes`
     );
 
     // Return PDF binary with metadata headers so the base VPS can read them
@@ -146,7 +152,7 @@ app.post('/extract', requireSecret, async (req, res) => {
     res.status(200).send(pdfBuffer);
   } catch (err) {
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.error(`[Worker] ❌ Extraction failed for ${documentId} after ${elapsed}s:`, err.message);
+    console.error(`${tag} [Worker] ❌ Extraction failed for ${documentId} after ${elapsed}s:`, err.message);
     res.status(500).json({
       success: false,
       message: err.message || 'Extraction failed.',
@@ -162,13 +168,14 @@ app.use((req, res) => {
 
 // ─── Global error handler ────────────────────────────
 app.use((err, req, res, next) => {
-  console.error('[Worker] Unhandled error:', err.stack);
+  console.error(`${tag} [Worker] Unhandled error:`, err.stack);
   res.status(500).json({ success: false, message: 'Internal error.' });
 });
 
 // ─── Start ───────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n🚀 Scribdly Worker running on port ${PORT}`);
+  console.log(`   Replica ID: ${REPLICA_ID}`);
   console.log(`   Worker ID: ${process.env.WORKER_ID || 'scribdly-worker'}`);
   console.log(`   Chrome:    ${process.env.CHROME_PATH || 'auto-detect'}`);
   console.log(`   Secret:    ${WORKER_SECRET ? '✅ set' : '❌ NOT SET — worker is unprotected!'}\n`);
