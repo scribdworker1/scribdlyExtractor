@@ -1,0 +1,16 @@
+# Railway deployment config
+# Docs: https://docs.railway.app/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "node src/server.js"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# Health check: Railway pings /health every 30s
+healthcheckPath = "/health"
+healthcheckTimeout = 10
+
