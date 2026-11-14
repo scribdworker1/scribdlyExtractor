@@ -124,7 +124,7 @@ app.post('/extract', requireSecret, async (req, res) => {
 
   const rangeStr = startPage || endPage ? ` [pages ${startPage || 1}..${endPage || 'end'}]` : '';
   console.log(
-      `${tag} [Worker] Queued extraction for document ${documentId}${rangeStr}${html ? ' (with pre-resolved HTML)' : ''}`
+    `${tag} [Worker] Queued extraction for document ${documentId}${rangeStr}${html ? ' (with pre-resolved HTML)' : ''}`
   );
   const startedAt = Date.now();
 
@@ -137,7 +137,7 @@ app.post('/extract', requireSecret, async (req, res) => {
 
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(
-        `${tag} [Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${elapsed}s — ${pdfBuffer.length} bytes`
+      `${tag} [Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${elapsed}s — ${pdfBuffer.length} bytes`
     );
 
     // Return PDF binary with metadata headers so the base VPS can read them
@@ -174,7 +174,7 @@ app.use((err, req, res, next) => {
 
 // ─── Start ───────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`\n🚀 Scribdly Worker running on port ${PORT}`);
+  console.log(`\n👌🏿 Scribdly Worker running on port ${PORT}`);
   console.log(`   Replica ID: ${REPLICA_ID}`);
   console.log(`   Worker ID: ${process.env.WORKER_ID || 'scribdly-worker'}`);
   console.log(`   Chrome:    ${process.env.CHROME_PATH || 'auto-detect'}`);
