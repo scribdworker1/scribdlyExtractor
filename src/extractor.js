@@ -55,9 +55,11 @@ function normalizeImageUrl(rawUrl) {
   if (!rawUrl) return null;
   let url = rawUrl.trim();
   if (url.startsWith('http://html.scribd.com/')) {
-    url = url.replace('http://html.scribd.com/', 'https://html.scribdassets.com/');
-  } else if (url.startsWith('https://html.scribd.com/')) {
-    url = url.replace('https://html.scribd.com/', 'https://html.scribdassets.com/');
+    url = url.replace('http://html.scribd.com/', 'https://html.scribd.com/');
+  } else if (url.startsWith('http://html.scribdassets.com/')) {
+    url = url.replace('http://html.scribdassets.com/', 'https://html.scribd.com/');
+  } else if (url.startsWith('https://html.scribdassets.com/')) {
+    url = url.replace('https://html.scribdassets.com/', 'https://html.scribd.com/');
   }
   if (url.includes('?')) url = url.split('?')[0];
   return url;
@@ -134,7 +136,14 @@ async function parseDocumentPages(html) {
     const pageNum = parseInt(pageId.replace(/\D/g, ''), 10) || i + 1;
     const imgEl = $(el).find('img.absimg, img');
     const normalized = normalizeImageUrl(imgEl.attr('orig') || imgEl.attr('src'));
-    if (normalized) pages.set(pageNum, { pageNum, imageUrl: normalized });
+    const style = $(el).attr('style') || '';
+    const wMatch = style.match(/width:\s*(\d+)px/i);
+    const hMatch = style.match(/height:\s*(\d+)px/i);
+    const width = wMatch ? parseInt(wMatch[1], 10) : 900;
+    const height = hMatch ? parseInt(hMatch[1], 10) : 1200;
+    if (normalized) {
+      pages.set(pageNum, { pageNum, imageUrl: normalized, width, height });
+    }
   });
 
   // Extract asset prefix
@@ -152,17 +161,37 @@ async function parseDocumentPages(html) {
   for (const block of addPageBlocks) {
     const pageNumMatch = block.match(/pageNum:\s*(\d+)/);
     const contentUrlMatch = block.match(/contentUrl:\s*["']([^"']+\.jsonp)["']/);
-    if (pageNumMatch && contentUrlMatch) {
+    const origWidthMatch = block.match(/origWidth:\s*(\d+)/);
+    const origHeightMatch = block.match(/origHeight:\s*(\d+)/);
+    const width = origWidthMatch ? parseInt(origWidthMatch[1], 10) : 900;
+    const height = origHeightMatch ? parseInt(origHeightMatch[1], 10) : 1200;
+
+    if (pageNumMatch) {
       const pageNum = parseInt(pageNumMatch[1], 10);
-      const contentUrl = contentUrlMatch[1];
-      const hashMatch = contentUrl.match(/pages\/(.+)\.jsonp/);
-      if (hashMatch && assetPrefix) {
-        pages.set(pageNum, {
-          pageNum,
-          imageUrl: `https://html.scribdassets.com/${assetPrefix}/images/${hashMatch[1]}.jpg`,
-        });
-      } else {
-        jsonpEntries.push({ pageNum, contentUrl });
+      if (contentUrlMatch) {
+        let contentUrl = contentUrlMatch[1];
+        if (contentUrl.startsWith('http://')) {
+          contentUrl = contentUrl.replace('http://', 'https://');
+        }
+        if (contentUrl.includes('html.scribdassets.com')) {
+          contentUrl = contentUrl.replace('html.scribdassets.com', 'html.scribd.com');
+        }
+        const hashMatch = contentUrl.match(/pages\/(.+)\.jsonp/);
+        if (hashMatch && assetPrefix) {
+          pages.set(pageNum, {
+            pageNum,
+            imageUrl: `https://html.scribd.com/${assetPrefix}/images/${hashMatch[1]}.jpg`,
+            contentUrl,
+            width,
+            height,
+          });
+        } else {
+          jsonpEntries.push({ pageNum, contentUrl, width, height });
+        }
+      } else if (pages.has(pageNum)) {
+        const existing = pages.get(pageNum);
+        existing.width = width;
+        existing.height = height;
       }
     }
   }
@@ -173,19 +202,23 @@ async function parseDocumentPages(html) {
     for (let i = 0; i < jsonpEntries.length; i += BATCH) {
       const batch = jsonpEntries.slice(i, i + BATCH);
       await Promise.all(
-        batch.map(async ({ pageNum, contentUrl }) => {
+        batch.map(async ({ pageNum, contentUrl, width, height }) => {
           try {
-            const res = await axios.get(contentUrl, { timeout: 8000 });
-            const text = res.data.replace(/\\"/g, '"');
+            const res = await axios.get(contentUrl, { timeout: 8000, validateStatus: (s) => s === 200 });
+            const text = (res.data || '').replace(/\\"/g, '"');
             const imgMatch =
               text.match(/<img[^>]+orig=["']([^"']+)["']/i) ||
               text.match(/<img[^>]+src=["']([^"']+)["']/i);
             let imgUrl = imgMatch ? normalizeImageUrl(imgMatch[1]) : null;
             if (!imgUrl && assetPrefix) {
               const hashMatch = contentUrl.match(/pages\/(.+)\.jsonp/);
-              if (hashMatch) imgUrl = `https://html.scribdassets.com/${assetPrefix}/images/${hashMatch[1]}.jpg`;
+              if (hashMatch) imgUrl = `https://html.scribd.com/${assetPrefix}/images/${hashMatch[1]}.jpg`;
             }
-            if (imgUrl) pages.set(pageNum, { pageNum, imageUrl: imgUrl });
+            const wMatch = text.match(/width:\s*(\d+)px/i);
+            const hMatch = text.match(/height:\s*(\d+)px/i);
+            const finalW = wMatch ? parseInt(wMatch[1], 10) : width;
+            const finalH = hMatch ? parseInt(hMatch[1], 10) : height;
+            pages.set(pageNum, { pageNum, imageUrl: imgUrl, contentUrl, width: finalW, height: finalH });
           } catch {}
         })
       );
@@ -221,18 +254,22 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
 
     const downloaded = await Promise.all(
       chunk.map(async (page) => {
-        const urlsToTry = [page.imageUrl];
-        if (page.imageUrl.includes('html.scribdassets.com')) {
-          urlsToTry.push(page.imageUrl.replace('html.scribdassets.com', 'html.scribd.com'));
-        } else if (page.imageUrl.includes('html.scribd.com')) {
-          urlsToTry.push(page.imageUrl.replace('html.scribd.com', 'html.scribdassets.com'));
+        // Construct URLs to try: prioritize html.scribd.com first, then fallback to html.scribdassets.com
+        const urlsToTry = [];
+        if (page.imageUrl) {
+          const primaryUrl = page.imageUrl.replace('html.scribdassets.com', 'html.scribd.com');
+          urlsToTry.push(primaryUrl);
+          const fallbackUrl = primaryUrl.replace('html.scribd.com', 'html.scribdassets.com');
+          if (fallbackUrl !== primaryUrl) {
+            urlsToTry.push(fallbackUrl);
+          }
         }
 
         for (const url of urlsToTry) {
           try {
             const res = await axios.get(url, {
               responseType: 'arraybuffer',
-              timeout: 20000,
+              timeout: 15000,
               headers: {
                 'User-Agent':
                   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -240,25 +277,101 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
                 Accept: 'image/jpeg,image/png,*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
               },
+              validateStatus: (status) => status === 200,
             });
-            return { page, buffer: Buffer.from(res.data) };
-          } catch (err) {
-            console.warn(`[Extractor] Fetch error on page ${page.pageNum} from ${url}: ${err.message}`);
+            if (res.data && res.data.length > 0) {
+              return { page, buffer: Buffer.from(res.data), isBlank: false };
+            }
+          } catch {
+            // First origin failed, try next without warning
           }
+        }
+
+        // Image downloads failed from all origins.
+        // Check if page has contentUrl (.jsonp) to inspect for blank page or inline image.
+        if (page.contentUrl) {
+          const jsonpUrls = [
+            page.contentUrl.replace('html.scribdassets.com', 'html.scribd.com'),
+            page.contentUrl.replace('html.scribd.com', 'html.scribdassets.com'),
+          ];
+
+          for (const jUrl of jsonpUrls) {
+            try {
+              const jRes = await axios.get(jUrl, {
+                timeout: 10000,
+                headers: {
+                  'User-Agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                  Referer: 'https://www.scribd.com/',
+                },
+                validateStatus: (status) => status === 200,
+              });
+
+              if (jRes.data && typeof jRes.data === 'string') {
+                const text = jRes.data.replace(/\\"/g, '"');
+                const imgMatch =
+                  text.match(/<img[^>]+orig=["']([^"']+)["']/i) ||
+                  text.match(/<img[^>]+src=["']([^"']+)["']/i);
+
+                if (imgMatch) {
+                  const altUrl = normalizeImageUrl(imgMatch[1]);
+                  if (altUrl && !urlsToTry.includes(altUrl)) {
+                    try {
+                      const altRes = await axios.get(altUrl, {
+                        responseType: 'arraybuffer',
+                        timeout: 15000,
+                        headers: { Referer: 'https://www.scribd.com/' },
+                        validateStatus: (status) => status === 200,
+                      });
+                      if (altRes.data && altRes.data.length > 0) {
+                        return { page, buffer: Buffer.from(altRes.data), isBlank: false };
+                      }
+                    } catch {}
+                  }
+                }
+
+                // Legitimate blank/text-only page
+                const wMatch = text.match(/width:\s*(\d+)px/i);
+                const hMatch = text.match(/height:\s*(\d+)px/i);
+                const width = wMatch ? parseInt(wMatch[1], 10) : (page.width || 900);
+                const height = hMatch ? parseInt(hMatch[1], 10) : (page.height || 1200);
+
+                console.log(`[Extractor] 📄 Preserved blank page ${page.pageNum} (${width}x${height})`);
+                return { page, buffer: null, isBlank: true, width, height };
+              }
+            } catch {}
+          }
+        }
+
+        // If dimensions were provided in addPage, preserve the page as blank rather than dropping it
+        if (page.width && page.height) {
+          console.warn(`[Extractor] ⚠️ Image failed for page ${page.pageNum}; inserting blank page (${page.width}x${page.height})`);
+          return { page, buffer: null, isBlank: true, width: page.width, height: page.height };
         }
 
         if (!firstError) {
           firstError = `Failed to fetch page ${page.pageNum} from all origins`;
         }
-        console.error(`[Extractor] Failed to fetch page ${page.pageNum} (${page.imageUrl}) from all origins`);
-        return { page, buffer: null };
+        console.error(`[Extractor] ❌ Failed to fetch page ${page.pageNum} (${page.imageUrl}) from all origins`);
+        return { page, buffer: null, isBlank: false };
       })
     );
 
-    for (const { page, buffer } of downloaded) {
+    for (const item of downloaded) {
+      const { page, buffer, isBlank, width: blankW, height: blankH } = item;
+
+      if (isBlank) {
+        const pageW = blankW || 900;
+        const pageH = blankH || 1200;
+        pdfDoc.addPage([pageW, pageH]);
+        embeddedCount++;
+        continue;
+      }
+
       if (!buffer) continue;
+
       try {
-        const isPng = page.imageUrl.endsWith('.png') || (buffer[0] === 0x89 && buffer[1] === 0x50);
+        const isPng = page.imageUrl?.endsWith('.png') || (buffer[0] === 0x89 && buffer[1] === 0x50);
         const embeddedImg = isPng ? await pdfDoc.embedPng(buffer) : await pdfDoc.embedJpg(buffer);
         const { width, height } = embeddedImg;
         const pdfPage = pdfDoc.addPage([width, height]);

@@ -126,18 +126,24 @@ app.post('/extract', requireSecret, async (req, res) => {
   console.log(
     `${tag} [Worker] Queued extraction for document ${documentId}${rangeStr}${html ? ' (with pre-resolved HTML)' : ''}`
   );
-  const startedAt = Date.now();
+  const queuedAt = Date.now();
+  let startedAt = queuedAt;
 
   try {
-    const result = await enqueueExtraction(() =>
-      extractToPdfBuffer(String(documentId), html || null, startPage || null, endPage || null)
-    );
+    const result = await enqueueExtraction(async () => {
+      startedAt = Date.now();
+      return extractToPdfBuffer(String(documentId), html || null, startPage || null, endPage || null);
+    });
 
     const { pdfBuffer, totalPages, thumbnailUrl, startPage: fromP, endPage: toP, partPages } = result;
 
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const executionElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const totalElapsed = ((Date.now() - queuedAt) / 1000).toFixed(1);
+    const queueWaitMs = startedAt - queuedAt;
+    const waitStr = queueWaitMs > 500 ? ` (queue wait: ${(queueWaitMs / 1000).toFixed(1)}s)` : '';
+
     console.log(
-      `${tag} [Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${elapsed}s — ${pdfBuffer.length} bytes`
+      `${tag} [Worker] ✅ Extracted ${partPages || totalPages} pages (range ${fromP || 1}..${toP || totalPages}) in ${executionElapsed}s${waitStr} — ${pdfBuffer.length} bytes`
     );
 
     // Return PDF binary with metadata headers so the base VPS can read them
@@ -148,15 +154,21 @@ app.post('/extract', requireSecret, async (req, res) => {
     res.setHeader('X-End-Page', toP || totalPages);
     res.setHeader('X-Part-Pages', partPages || totalPages);
     res.setHeader('X-Thumbnail-Url', thumbnailUrl || '');
-    res.setHeader('X-Elapsed-Seconds', elapsed);
+    res.setHeader('X-Elapsed-Seconds', executionElapsed);
+    res.setHeader('X-Total-Seconds', totalElapsed);
     res.status(200).send(pdfBuffer);
   } catch (err) {
-    const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
-    console.error(`${tag} [Worker] ❌ Extraction failed for ${documentId} after ${elapsed}s:`, err.message);
+    const executionElapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const totalElapsed = ((Date.now() - queuedAt) / 1000).toFixed(1);
+    console.error(
+      `${tag} [Worker] ❌ Extraction failed for ${documentId} after ${executionElapsed}s (total ${totalElapsed}s):`,
+      err.message
+    );
     res.status(500).json({
       success: false,
       message: err.message || 'Extraction failed.',
-      elapsed,
+      elapsed: executionElapsed,
+      totalElapsed,
     });
   }
 });
