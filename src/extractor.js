@@ -521,7 +521,15 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       return req.continue();
     });
 
-    if (html && typeof html === 'string' && html.length > 1000 && !html.includes('Client Challenge')) {
+    // Check if we have valid pre-resolved embed HTML (not bot challenge and not embed error page)
+    const hasValidHtml =
+      html &&
+      typeof html === 'string' &&
+      html.length > 1000 &&
+      !html.includes('Client Challenge') &&
+      !isDocumentConversionFailed(html);
+
+    if (hasValidHtml) {
       let pageHtml = html;
       // Pre-rewrite asset host to html.scribd.com so all dynamic scripts load with HTTP 200
       pageHtml = pageHtml.replace(/https?:\/\/html\.scribdassets\.com/g, 'https://html.scribd.com');
@@ -530,49 +538,40 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       }
       await page.setContent(pageHtml, { waitUntil: 'domcontentloaded' });
     } else {
-      const embedUrl = `https://www.scribd.com/embeds/${documentId}/content`;
-      await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    }
-
-    // Check immediately if Scribd reported conversion failure or unavailable document
-    const unavailableReason = await page.evaluate(() => {
-      const errBox = document.querySelector('.auto__embeds_unavailable, .embeds_error');
-      if (errBox) {
-        const text = errBox.innerText.replace(/\s+/g, ' ').trim();
-        return text || 'Document failed to convert on Scribd';
-      }
-      const bodyText = document.body ? document.body.innerText : '';
-      if (bodyText.includes('Document failed to convert') || bodyText.includes("can't display this document")) {
-        return "Document failed to convert on Scribd. Sorry, we can't display this document.";
-      }
-      return null;
-    }).catch(() => null);
-
-    if (unavailableReason) {
-      console.error(`[Extractor] Fast rejection for ${documentId}: ${unavailableReason}`);
-      throw new Error(`Scribd conversion error: ${unavailableReason}`);
+      // Navigate to the main document page!
+      // This is crucial because some documents (like 269431184) have broken/disabled embeds,
+      // but are completely readable and healthy on the main document URL!
+      const docUrl = `https://www.scribd.com/document/${documentId}`;
+      console.log(`[Extractor] Navigating to main document URL: ${docUrl}`);
+      await page.goto(docUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
     }
 
     try {
       await page.waitForFunction(
-        () => {
-          if (document.querySelector('.auto__embeds_unavailable, .embeds_error')) {
-            throw new Error('Document failed to convert on Scribd');
-          }
-          return !!window.docManager || !!document.querySelector('.newpage');
-        },
-        { timeout: 35000 }
+        () => !!window.docManager || !!document.querySelector('.outer_page, .newpage'),
+        { timeout: 30000 }
       );
     } catch (waitErr) {
-      const pageTitle = await page.title().catch(() => '');
-      const pageUrl = page.url();
-      const bodySnippet = await page
-        .evaluate(() => (document.body ? document.body.innerText.slice(0, 300) : ''))
-        .catch(() => '');
-      console.error(
-        `[Extractor] Reader wait failed on ${pageUrl}. Title: "${pageTitle}", Preview: "${bodySnippet.replace(/\s+/g, ' ')}"`
-      );
-      throw new Error(`Scribd reader did not initialize (Title: "${pageTitle}"). ${waitErr.message}`);
+      // If we used pre-resolved HTML or embed and it failed, try navigating to the main document page!
+      const currentUrl = page.url();
+      if (!currentUrl.includes(`/document/${documentId}`)) {
+        console.warn(`[Extractor] Embed view failed for ${documentId}. Retrying via main document page...`);
+        const docUrl = `https://www.scribd.com/document/${documentId}`;
+        await page.goto(docUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+        await page.waitForFunction(
+          () => !!window.docManager || !!document.querySelector('.outer_page, .newpage'),
+          { timeout: 30000 }
+        );
+      } else {
+        const pageTitle = await page.title().catch(() => '');
+        const bodySnippet = await page
+          .evaluate(() => (document.body ? document.body.innerText.slice(0, 300) : ''))
+          .catch(() => '');
+        console.error(
+          `[Extractor] Reader wait failed on ${currentUrl}. Title: "${pageTitle}", Preview: "${bodySnippet.replace(/\s+/g, ' ')}"`
+        );
+        throw new Error(`Scribd reader did not initialize (Title: "${pageTitle}"). ${waitErr.message}`);
+      }
     }
 
     // If document is pure image pages without complex vectors/fonts, use fast parallel image download
@@ -703,15 +702,18 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
           // Bypasses the Linux Chromium 16,384px GPU/software texture limit by capturing only the 1200x1600 viewport
           try {
             const rect = await page.evaluate((pNum) => {
+              const outer = document.getElementById('outer_page_' + pNum);
+              if (outer) outer.scrollIntoView({ behavior: 'instant', block: 'start' });
               const el = document.getElementById('page' + pNum);
-              if (!el) return null;
-              el.scrollIntoView({ behavior: 'instant', block: 'start' });
-              const r = el.getBoundingClientRect();
+              const target = el && el.offsetHeight > 0 ? el : outer;
+              if (!target) return null;
+              target.scrollIntoView({ behavior: 'instant', block: 'start' });
+              const r = target.getBoundingClientRect();
               return {
                 x: Math.max(0, r.left),
                 y: Math.max(0, r.top),
-                width: r.width,
-                height: r.height,
+                width: r.width > 0 ? r.width : target.offsetWidth,
+                height: r.height > 0 ? r.height : target.offsetHeight,
               };
             }, p);
 
@@ -839,30 +841,30 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
  */
 async function extractToPdfBuffer(documentId, initialHtml = null, startPage = null, endPage = null) {
   let html = initialHtml;
+
+  // If HTML is an embed failure page, discard it so we navigate to the main document page
+  if (html && isDocumentConversionFailed(html)) {
+    html = null;
+  }
+
   if (!html || typeof html !== 'string' || html.length < 1000) {
-    html = await fetchEmbedHtml(documentId);
+    const fetched = await fetchEmbedHtml(documentId).catch(() => null);
+    if (fetched && !isDocumentConversionFailed(fetched) && !fetched.includes('Client Challenge')) {
+      html = fetched;
+    } else {
+      html = null;
+    }
   }
 
-  if (!html || html.length < 1000) {
-    throw new Error('Could not retrieve document content from Scribd. Please try again.');
-  }
-
-  if (isDocumentConversionFailed(html)) {
-    throw new Error('This document failed to convert on Scribd and cannot be displayed or extracted.');
-  }
-
-  const isHybrid = isHybridDocument(html);
-  const isChallenge = html.includes('Client Challenge') || html.length < 5000;
   const browserPath = getBrowserExecutablePath();
 
-  if ((isHybrid || isChallenge) && browserPath) {
+  // If no clean HTML or hybrid, use browser which navigates directly to document page
+  if (browserPath && (!html || isHybridDocument(html))) {
     return await extractHybridDocumentToBuffer(documentId, browserPath, startPage, endPage, html);
   }
 
-  if (isChallenge && !browserPath) {
-    throw new Error(
-      'Scribd served a bot challenge and Chrome is not available on this worker. Try a different worker.'
-    );
+  if (!html) {
+    throw new Error('Could not retrieve document content from Scribd. Please try again.');
   }
 
   // Fast path: direct image extraction
@@ -885,8 +887,8 @@ async function extractToPdfBuffer(documentId, initialHtml = null, startPage = nu
 async function inspectDocumentInfo(documentId, initialHtml = null) {
   let html = initialHtml;
 
-  if (isDocumentConversionFailed(html)) {
-    throw new Error('This document failed to convert on Scribd and cannot be displayed or extracted.');
+  if (html && isDocumentConversionFailed(html)) {
+    html = null;
   }
 
   // 1. Fast regex lookup if HTML was provided
@@ -905,7 +907,10 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
 
   // 2. Fetch embed HTML if not provided
   if (!html || html.length < 1000) {
-    html = await fetchEmbedHtml(documentId).catch(() => null);
+    const fetched = await fetchEmbedHtml(documentId).catch(() => null);
+    if (fetched && !isDocumentConversionFailed(fetched)) {
+      html = fetched;
+    }
   }
 
   if (html && typeof html === 'string' && !html.includes('Client Challenge')) {
@@ -945,27 +950,29 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
       ],
     });
     const page = await browser.newPage();
-    if (html && typeof html === 'string' && html.length > 1000 && !html.includes('Client Challenge')) {
+    if (html && typeof html === 'string' && html.length > 1000 && !html.includes('Client Challenge') && !isDocumentConversionFailed(html)) {
       let pageHtml = html;
       if (!pageHtml.includes('<base')) {
         pageHtml = pageHtml.replace(/<head[^>]*>/i, '$&<base href="https://www.scribd.com/">');
       }
       await page.setContent(pageHtml, { waitUntil: 'domcontentloaded' });
     } else {
-      await page.goto(`https://www.scribd.com/embeds/${documentId}/content`, {
+      await page.goto(`https://www.scribd.com/document/${documentId}`, {
         waitUntil: 'domcontentloaded',
         timeout: 20000,
       });
     }
 
-    await page.waitForFunction(() => !!window.docManager || !!document.querySelector('.newpage'), {
+    await page.waitForFunction(() => !!window.docManager || !!document.querySelector('.outer_page, .newpage'), {
       timeout: 15000,
     });
 
     const docInfo = await page.evaluate(() => {
-      if (window.docManager) {
-        return { totalPages: Object.keys(window.docManager.pages || {}).length };
+      if (window.docManager && window.docManager.pages && Object.keys(window.docManager.pages).length > 0) {
+        return { totalPages: Object.keys(window.docManager.pages).length };
       }
+      const outerCount = document.querySelectorAll('.outer_page').length;
+      if (outerCount > 0) return { totalPages: outerCount };
       return { totalPages: document.querySelectorAll('.newpage').length };
     });
 
