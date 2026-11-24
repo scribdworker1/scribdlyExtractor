@@ -50,6 +50,17 @@ function getBrowserExecutablePath() {
   return null;
 }
 
+// ─── Document Failure Detection ───────────────────────
+function isDocumentConversionFailed(html) {
+  if (!html || typeof html !== 'string') return false;
+  return (
+    html.includes('Document failed to convert') ||
+    html.includes("Sorry, we can't display this document") ||
+    html.includes('auto__embeds_unavailable') ||
+    html.includes('embeds_error')
+  );
+}
+
 // ─── Normalize Image URLs ─────────────────────────────
 function normalizeImageUrl(rawUrl) {
   if (!rawUrl) return null;
@@ -97,7 +108,7 @@ async function fetchEmbedHtml(documentId) {
       if (url === embedUrl && res.status === 200 && res.data?.length > 5000 && !res.data.includes('Client Challenge')) {
         return res.data;
       }
-    } catch {}
+    } catch { }
   }
 
   // Final attempt
@@ -219,7 +230,7 @@ async function parseDocumentPages(html) {
             const finalW = wMatch ? parseInt(wMatch[1], 10) : width;
             const finalH = hMatch ? parseInt(hMatch[1], 10) : height;
             pages.set(pageNum, { pageNum, imageUrl: imgUrl, contentUrl, width: finalW, height: finalH });
-          } catch {}
+          } catch { }
         })
       );
     }
@@ -326,7 +337,7 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
                       if (altRes.data && altRes.data.length > 0) {
                         return { page, buffer: Buffer.from(altRes.data), isBlank: false };
                       }
-                    } catch {}
+                    } catch { }
                   }
                 }
 
@@ -339,7 +350,7 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
                 console.log(`[Extractor] 📄 Preserved blank page ${page.pageNum} (${width}x${height})`);
                 return { page, buffer: null, isBlank: true, width, height };
               }
-            } catch {}
+            } catch { }
           }
         }
 
@@ -450,8 +461,8 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       });
       window.chrome = {
         runtime: {},
-        loadTimes: function () {},
-        csi: function () {},
+        loadTimes: function () { },
+        csi: function () { },
         app: {},
       };
       Object.defineProperty(navigator, 'plugins', {
@@ -523,9 +534,33 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       await page.goto(embedUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
     }
 
+    // Check immediately if Scribd reported conversion failure or unavailable document
+    const unavailableReason = await page.evaluate(() => {
+      const errBox = document.querySelector('.auto__embeds_unavailable, .embeds_error');
+      if (errBox) {
+        const text = errBox.innerText.replace(/\s+/g, ' ').trim();
+        return text || 'Document failed to convert on Scribd';
+      }
+      const bodyText = document.body ? document.body.innerText : '';
+      if (bodyText.includes('Document failed to convert') || bodyText.includes("can't display this document")) {
+        return "Document failed to convert on Scribd. Sorry, we can't display this document.";
+      }
+      return null;
+    }).catch(() => null);
+
+    if (unavailableReason) {
+      console.error(`[Extractor] Fast rejection for ${documentId}: ${unavailableReason}`);
+      throw new Error(`Scribd conversion error: ${unavailableReason}`);
+    }
+
     try {
       await page.waitForFunction(
-        () => !!window.docManager || !!document.querySelector('.newpage'),
+        () => {
+          if (document.querySelector('.auto__embeds_unavailable, .embeds_error')) {
+            throw new Error('Document failed to convert on Scribd');
+          }
+          return !!window.docManager || !!document.querySelector('.newpage');
+        },
         { timeout: 35000 }
       );
     } catch (waitErr) {
@@ -544,10 +579,10 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     const renderedHtml = await page.content();
     const isDocHybrid = isHybridDocument(renderedHtml);
     if (!isDocHybrid) {
-      await browser.close().catch(() => {});
+      await browser.close().catch(() => { });
       try {
         if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-      } catch {}
+      } catch { }
       return await extractImageDocumentToBuffer(documentId, renderedHtml, startPage, endPage);
     }
 
@@ -594,13 +629,13 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       try {
         await page.evaluate((pNum) => {
           if (window.docManager) {
-            try { window.docManager.gotoPage(pNum); } catch {}
+            try { window.docManager.gotoPage(pNum); } catch { }
             try {
               if (window.docManager.pages && window.docManager.pages[pNum]) {
                 window.docManager.pages[pNum].load();
                 window.docManager.pages[pNum].display();
               }
-            } catch {}
+            } catch { }
           }
           const outerEl = document.getElementById('outer_page_' + pNum);
           if (outerEl) {
@@ -777,19 +812,19 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     if (browser) {
       try {
         const proc = browser.process();
-        await browser.close().catch(() => {});
+        await browser.close().catch(() => { });
         if (proc && !proc.killed) {
           try {
             proc.kill('SIGKILL');
-          } catch {}
+          } catch { }
         }
-      } catch {}
+      } catch { }
     }
     try {
       if (fs.existsSync(sessionDir)) {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
-    } catch {}
+    } catch { }
   }
 }
 
@@ -810,6 +845,10 @@ async function extractToPdfBuffer(documentId, initialHtml = null, startPage = nu
 
   if (!html || html.length < 1000) {
     throw new Error('Could not retrieve document content from Scribd. Please try again.');
+  }
+
+  if (isDocumentConversionFailed(html)) {
+    throw new Error('This document failed to convert on Scribd and cannot be displayed or extracted.');
   }
 
   const isHybrid = isHybridDocument(html);
@@ -845,6 +884,10 @@ async function extractToPdfBuffer(documentId, initialHtml = null, startPage = nu
  */
 async function inspectDocumentInfo(documentId, initialHtml = null) {
   let html = initialHtml;
+
+  if (isDocumentConversionFailed(html)) {
+    throw new Error('This document failed to convert on Scribd and cannot be displayed or extracted.');
+  }
 
   // 1. Fast regex lookup if HTML was provided
   if (html && typeof html === 'string') {
@@ -934,17 +977,17 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
     if (browser) {
       try {
         const proc = browser.process();
-        await browser.close().catch(() => {});
+        await browser.close().catch(() => { });
         if (proc && !proc.killed) {
           try {
             proc.kill('SIGKILL');
-          } catch {}
+          } catch { }
         }
-      } catch {}
+      } catch { }
     }
     try {
       if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-    } catch {}
+    } catch { }
   }
 }
 
