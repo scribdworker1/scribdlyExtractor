@@ -96,7 +96,9 @@ app.post('/inspect', requireSecret, async (req, res) => {
   }
 
   try {
-    const info = await inspectDocumentInfo(String(documentId), html || null);
+    const info = await enqueueExtraction(async () => {
+      return inspectDocumentInfo(String(documentId), html || null);
+    });
     res.status(200).json({ success: true, ...info });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

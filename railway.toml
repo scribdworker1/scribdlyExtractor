@@ -6,7 +6,7 @@ builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "node src/server.js"
+startCommand = "/usr/bin/tini -- node src/server.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
 

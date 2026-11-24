@@ -432,10 +432,15 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
         '--mute-audio',
         '--disk-cache-size=104857600',
         '--disable-crash-reporter',
+        '--disable-breakpad',
         '--crash-dumps-dir=/tmp',
         `--user-data-dir=${sessionDir}`,
         '--disable-gpu',
         '--hide-scrollbars',
+        '--no-zygote',
+        '--single-process',
+        '--renderer-process-limit=1',
+        '--disable-features=IsolateOrigins,site-per-process',
       ],
     });
 
@@ -774,12 +779,24 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     };
   } finally {
     if (browser) {
-      await browser.close().catch(() => {});
+      try {
+        const proc = browser.process();
+        await browser.close().catch(() => {});
+        if (proc && !proc.killed) {
+          try {
+            proc.kill('SIGKILL');
+          } catch {}
+        }
+      } catch {}
     }
     try {
       if (fs.existsSync(sessionDir)) {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
+    } catch {}
+    try {
+      const { execSync } = require('child_process');
+      execSync('pkill -9 -f "chrome-session-" || true');
     } catch {}
   }
 }
@@ -883,7 +900,16 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
       headless: 'new',
       protocolTimeout: 30000,
       userDataDir: sessionDir,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--disable-breakpad',
+        '--disable-crash-reporter',
+        '--renderer-process-limit=1',
+      ],
     });
     const page = await browser.newPage();
     if (html && typeof html === 'string' && html.length > 1000 && !html.includes('Client Challenge')) {
@@ -915,7 +941,17 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
     console.warn(`[Extractor] Inspect error for ${documentId}: ${err.message}`);
     return { totalPages: 1 };
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      try {
+        const proc = browser.process();
+        await browser.close().catch(() => {});
+        if (proc && !proc.killed) {
+          try {
+            proc.kill('SIGKILL');
+          } catch {}
+        }
+      } catch {}
+    }
     try {
       if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
     } catch {}
