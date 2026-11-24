@@ -574,6 +574,23 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       }
     }
 
+    // Click Fullscreen button to switch to clean, borderless reader layout without website headers/sidebars
+    try {
+      await page.evaluate(() => {
+        const fsBtn =
+          document.querySelector('button[aria-label="Fullscreen" i]') ||
+          document.querySelector('[aria-label*="fullscreen" i]') ||
+          document.querySelector('button.fullscreen_btn, .fullscreen_btn') ||
+          document.querySelector('button[title*="fullscreen" i]');
+        if (fsBtn) {
+          fsBtn.click();
+        }
+      });
+      await new Promise((r) => setTimeout(r, 600));
+    } catch (fsErr) {
+      console.warn(`[Extractor] Fullscreen trigger note: ${fsErr.message}`);
+    }
+
     // If document is pure image pages without complex vectors/fonts, use fast parallel image download
     const renderedHtml = await page.content();
     const isDocHybrid = isHybridDocument(renderedHtml);
@@ -587,24 +604,63 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
 
     // Inject style to un-blur blurred pages, force hidden webfont containers visible, and flush fonts
     await page.evaluate(() => {
+      // 1. Remove interfering fixed and sticky chrome (headers, cookies, toolbars)
+      document.querySelectorAll('*').forEach((el) => {
+        try {
+          const s = window.getComputedStyle(el);
+          if (s.position === 'fixed' || s.position === 'sticky') {
+            if (!el.closest('.outer_page, .newpage, #document_container, .outer_page_container, [id^="page"], [id^="outer_page_"]')) {
+              el.remove();
+            }
+          }
+        } catch {}
+      });
+
+      // 2. Remove sidebars, headers, banners, cookies, ads
+      document.querySelectorAll(
+        'aside, [class*="sidebar"], #global_header, [class*="_2MHqNa"], [class*="osano"], ins.adsbygoogle, iframe[id*="google"], [id*="aswift"], [id*="google_vignette"], [class*="toolbar"], [class*="between_page"], [class*="promo"]'
+      ).forEach((e) => e.remove());
+
       const style = document.createElement('style');
       style.innerHTML = `
-        .ff0, .ff1, .ff2, .ff3, .ff4, .ff5, .ff6, .ff7, .ff8, .ff9, div[class*="ff"] {
-          display: block !important;
+        #global_header, ._2MHqNa, .osano-cm-window, .osano-cm-dialog, [class*="osano"],
+        aside, [class*="sidebar"], [class*="toolbar"], [class*="between_page"], [class*="promo"],
+        ins.adsbygoogle, iframe[id*="google"], [id*="aswift"], [id*="google_vignette"] {
+          display: none !important;
+          visibility: hidden !important;
+        }
+        .outer_page {
+          overflow: hidden !important;
+        }
+        .ff0, .ff1, .ff2, .ff3, .ff4, .ff5, .ff6, .ff7, .ff8, .ff9, span[class*="ff"], div[class*="ff"], .text_layer, .text_layer * {
+          display: inline-block !important;
           visibility: visible !important;
           opacity: 1 !important;
+          color: #000 !important;
+          text-shadow: none !important;
+          filter: none !important;
+          -webkit-text-fill-color: initial !important;
         }
-        .outer_page.blurred_page .text_layer { text-shadow: none !important; color: #000 !important; }
-        .outer_page.blurred_page .text_layer [style] { color: #000 !important; }
-        .outer_page.blurred_page .image_layer img { opacity: 1 !important; }
-        .newpage { transform: none !important; margin: 0 !important; }
+        .outer_page.blurred_page, .blurred_page, [class*="blurred"] {
+          filter: none !important;
+          -webkit-filter: none !important;
+          opacity: 1 !important;
+        }
+        .outer_page.blurred_page .text_layer,
+        .blurred_page .text_layer {
+          filter: none !important;
+          -webkit-filter: none !important;
+          text-shadow: none !important;
+          color: #000 !important;
+        }
+        .outer_page.blurred_page .image_layer img,
+        .blurred_page .image_layer img {
+          filter: none !important;
+          -webkit-filter: none !important;
+          opacity: 1 !important;
+        }
       `;
       document.head.appendChild(style);
-      if (window.docManager?._fontLoader) {
-        const fl = window.docManager._fontLoader;
-        Object.keys(fl.fonts || {}).forEach((id) => fl.addFontToQueue(id));
-        fl.flushFontQueue();
-      }
     });
 
     const docInfo = await page.evaluate(() => {
@@ -638,11 +694,11 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
           }
           const outerEl = document.getElementById('outer_page_' + pNum);
           if (outerEl) {
-            outerEl.scrollIntoView({ behavior: 'instant', block: 'start' });
+            outerEl.scrollIntoView({ behavior: 'instant', block: 'center' });
           }
           const el = document.getElementById('page' + pNum);
           if (el) {
-            el.scrollIntoView({ behavior: 'instant', block: 'start' });
+            el.scrollIntoView({ behavior: 'instant', block: 'center' });
             // Pre-assign image src from orig attribute to prevent layout mutations during screenshot
             const imgs = el.querySelectorAll('img');
             imgs.forEach((img) => {
@@ -673,73 +729,76 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
         try {
           await page.waitForFunction(
             (pNum) => {
+              const outer = document.getElementById('outer_page_' + pNum);
               const el = document.getElementById('page' + pNum);
-              if (!el) return false;
-              const imgs = Array.from(el.querySelectorAll('img'));
+              const target = el || outer;
+              if (!target) return false;
+              const imgs = Array.from(target.querySelectorAll('img'));
               for (const img of imgs) {
                 if (img.getAttribute('orig') && !img.src) return false;
                 if (img.src && (!img.complete || img.naturalWidth === 0)) return false;
               }
-              const hasSpans = el.querySelectorAll('span').length > 0;
-              const hasImgs = imgs.length > 0;
-              return hasSpans || hasImgs;
+              return target.offsetHeight > 50;
             },
             { timeout: 9000 },
             p
           );
+          // Wait for webfonts to finish rendering so no text is skipped or blurred
+          await page.evaluate(() => document.fonts.ready).catch(() => {});
+          await new Promise((r) => setTimeout(r, 150));
         } catch (waitErr) {
-          const elExists = await page.evaluate((pNum) => !!document.getElementById('page' + pNum), p);
+          const elExists = await page.evaluate(
+            (pNum) => !!(document.getElementById('page' + pNum) || document.getElementById('outer_page_' + pNum)),
+            p
+          );
           if (!elExists) {
             throw waitErr;
           }
         }
 
-        const pageEl = await page.$(`#page${p}`);
-        if (pageEl) {
+        const targetEl = (await page.$(`#outer_page_${p}`)) || (await page.$(`#page${p}`));
+        if (targetEl) {
           let imgBuf = null;
 
-          // Attempt 1: Viewport-clipped screenshot with captureBeyondViewport: false
-          // Bypasses the Linux Chromium 16,384px GPU/software texture limit by capturing only the 1200x1600 viewport
+          // Attempt 1: Direct element screenshot (with captureBeyondViewport enabled to capture all text)
           try {
-            const rect = await page.evaluate((pNum) => {
-              const outer = document.getElementById('outer_page_' + pNum);
-              if (outer) outer.scrollIntoView({ behavior: 'instant', block: 'start' });
-              const el = document.getElementById('page' + pNum);
-              const target = el && el.offsetHeight > 0 ? el : outer;
-              if (!target) return null;
-              target.scrollIntoView({ behavior: 'instant', block: 'start' });
-              const r = target.getBoundingClientRect();
-              return {
-                x: Math.max(0, r.left),
-                y: Math.max(0, r.top),
-                width: r.width > 0 ? r.width : target.offsetWidth,
-                height: r.height > 0 ? r.height : target.offsetHeight,
-              };
-            }, p);
-
-            if (rect && rect.width > 0 && rect.height > 0) {
-              imgBuf = await page.screenshot({
-                type: 'jpeg',
-                quality: 80,
-                captureBeyondViewport: false,
-                clip: {
-                  x: Math.round(rect.x),
-                  y: Math.round(rect.y),
-                  width: Math.round(rect.width),
-                  height: Math.round(rect.height),
-                },
-              });
-            }
-          } catch (vpErr) {
-            console.warn(`[Extractor] Viewport screenshot on page ${p} failed: ${vpErr.message}, trying element fallback...`);
+            imgBuf = await targetEl.screenshot({ type: 'jpeg', quality: 90, captureBeyondViewport: true });
+          } catch (elErr) {
+            console.warn(`[Extractor] Direct element screenshot on page ${p} failed: ${elErr.message}, trying viewport fallback...`);
           }
 
-          // Attempt 2: Direct element screenshot fallback
+          // Attempt 2: Viewport-clipped screenshot fallback
           if (!imgBuf) {
             try {
-              imgBuf = await pageEl.screenshot({ type: 'jpeg', quality: 80, captureBeyondViewport: false });
-            } catch (shotErr) {
-              console.warn(`[Extractor] Element screenshot on page ${p} failed: ${shotErr.message}`);
+              const rect = await page.evaluate((pNum) => {
+                const outer = document.getElementById('outer_page_' + pNum);
+                const el = document.getElementById('page' + pNum);
+                const target = outer || el;
+                if (!target) return null;
+                target.scrollIntoView({ behavior: 'instant', block: 'center' });
+                const r = target.getBoundingClientRect();
+                return {
+                  x: Math.max(0, r.left),
+                  y: Math.max(0, r.top),
+                  width: r.width > 0 ? r.width : target.offsetWidth,
+                  height: r.height > 0 ? r.height : target.offsetHeight,
+                };
+              }, p);
+
+              if (rect && rect.width > 0 && rect.height > 0) {
+                imgBuf = await page.screenshot({
+                  type: 'jpeg',
+                  quality: 85,
+                  clip: {
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                  },
+                });
+              }
+            } catch (vpErr) {
+              console.warn(`[Extractor] Viewport fallback on page ${p} failed: ${vpErr.message}`);
             }
           }
 
