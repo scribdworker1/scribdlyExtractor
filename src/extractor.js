@@ -108,7 +108,7 @@ async function fetchEmbedHtml(documentId) {
       if (url === embedUrl && res.status === 200 && res.data?.length > 5000 && !res.data.includes('Client Challenge')) {
         return res.data;
       }
-    } catch { }
+    } catch {}
   }
 
   // Final attempt
@@ -230,7 +230,7 @@ async function parseDocumentPages(html) {
             const finalW = wMatch ? parseInt(wMatch[1], 10) : width;
             const finalH = hMatch ? parseInt(hMatch[1], 10) : height;
             pages.set(pageNum, { pageNum, imageUrl: imgUrl, contentUrl, width: finalW, height: finalH });
-          } catch { }
+          } catch {}
         })
       );
     }
@@ -337,7 +337,7 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
                       if (altRes.data && altRes.data.length > 0) {
                         return { page, buffer: Buffer.from(altRes.data), isBlank: false };
                       }
-                    } catch { }
+                    } catch {}
                   }
                 }
 
@@ -350,7 +350,7 @@ async function extractImageDocumentToBuffer(documentId, html, startPage = null, 
                 console.log(`[Extractor] 📄 Preserved blank page ${page.pageNum} (${width}x${height})`);
                 return { page, buffer: null, isBlank: true, width, height };
               }
-            } catch { }
+            } catch {}
           }
         }
 
@@ -461,8 +461,8 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       });
       window.chrome = {
         runtime: {},
-        loadTimes: function () { },
-        csi: function () { },
+        loadTimes: function () {},
+        csi: function () {},
         app: {},
       };
       Object.defineProperty(navigator, 'plugins', {
@@ -579,10 +579,10 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     const renderedHtml = await page.content();
     const isDocHybrid = isHybridDocument(renderedHtml);
     if (!isDocHybrid) {
-      await browser.close().catch(() => { });
+      await browser.close().catch(() => {});
       try {
         if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-      } catch { }
+      } catch {}
       return await extractImageDocumentToBuffer(documentId, renderedHtml, startPage, endPage);
     }
 
@@ -629,13 +629,13 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
       try {
         await page.evaluate((pNum) => {
           if (window.docManager) {
-            try { window.docManager.gotoPage(pNum); } catch { }
+            try { window.docManager.gotoPage(pNum); } catch {}
             try {
               if (window.docManager.pages && window.docManager.pages[pNum]) {
                 window.docManager.pages[pNum].load();
                 window.docManager.pages[pNum].display();
               }
-            } catch { }
+            } catch {}
           }
           const outerEl = document.getElementById('outer_page_' + pNum);
           if (outerEl) {
@@ -812,19 +812,19 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     if (browser) {
       try {
         const proc = browser.process();
-        await browser.close().catch(() => { });
+        await browser.close().catch(() => {});
         if (proc && !proc.killed) {
           try {
             proc.kill('SIGKILL');
-          } catch { }
+          } catch {}
         }
-      } catch { }
+      } catch {}
     }
     try {
       if (fs.existsSync(sessionDir)) {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       }
-    } catch { }
+    } catch {}
   }
 }
 
@@ -977,17 +977,17 @@ async function inspectDocumentInfo(documentId, initialHtml = null) {
     if (browser) {
       try {
         const proc = browser.process();
-        await browser.close().catch(() => { });
+        await browser.close().catch(() => {});
         if (proc && !proc.killed) {
           try {
             proc.kill('SIGKILL');
-          } catch { }
+          } catch {}
         }
-      } catch { }
+      } catch {}
     }
     try {
       if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-    } catch { }
+    } catch {}
   }
 }
 
