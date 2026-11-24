@@ -452,7 +452,7 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1200, height: 1600, deviceScaleFactor: scaleFactor });
+    await page.setViewport({ width: 1200, height: 1800, deviceScaleFactor: scaleFactor });
 
     // Stealth evasion: mask navigator.webdriver and mock chrome environment
     await page.evaluateOnNewDocument(() => {
@@ -760,14 +760,20 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
         if (targetEl) {
           let imgBuf = null;
 
-          // Attempt 1: Direct element screenshot (with captureBeyondViewport enabled to capture all text)
+          // Attempt 1: Direct element screenshot (with target centered in viewport)
           try {
-            imgBuf = await targetEl.screenshot({ type: 'jpeg', quality: 90, captureBeyondViewport: true });
+            await page.evaluate((pNum) => {
+              const outer = document.getElementById('outer_page_' + pNum);
+              const el = document.getElementById('page' + pNum);
+              const target = outer || el;
+              if (target) target.scrollIntoView({ behavior: 'instant', block: 'center' });
+            }, p);
+            imgBuf = await targetEl.screenshot({ type: 'jpeg', quality: 90, captureBeyondViewport: false });
           } catch (elErr) {
             console.warn(`[Extractor] Direct element screenshot on page ${p} failed: ${elErr.message}, trying viewport fallback...`);
           }
 
-          // Attempt 2: Viewport-clipped screenshot fallback
+          // Attempt 2: Viewport-clipped screenshot fallback with strict bounds clamping
           if (!imgBuf) {
             try {
               const rect = await page.evaluate((pNum) => {
@@ -777,18 +783,20 @@ async function extractHybridDocumentToBuffer(documentId, browserPath, startPage 
                 if (!target) return null;
                 target.scrollIntoView({ behavior: 'instant', block: 'center' });
                 const r = target.getBoundingClientRect();
-                return {
-                  x: Math.max(0, r.left),
-                  y: Math.max(0, r.top),
-                  width: r.width > 0 ? r.width : target.offsetWidth,
-                  height: r.height > 0 ? r.height : target.offsetHeight,
-                };
+                const vw = window.innerWidth;
+                const vh = window.innerHeight;
+                const left = Math.max(0, Math.min(vw - 1, r.left));
+                const top = Math.max(0, Math.min(vh - 1, r.top));
+                const width = Math.max(1, Math.min(vw - left, r.width > 0 ? r.width : target.offsetWidth));
+                const height = Math.max(1, Math.min(vh - top, r.height > 0 ? r.height : target.offsetHeight));
+                return { x: left, y: top, width, height };
               }, p);
 
               if (rect && rect.width > 0 && rect.height > 0) {
                 imgBuf = await page.screenshot({
                   type: 'jpeg',
                   quality: 85,
+                  captureBeyondViewport: false,
                   clip: {
                     x: Math.round(rect.x),
                     y: Math.round(rect.y),
